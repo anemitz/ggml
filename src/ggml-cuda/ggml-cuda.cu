@@ -1931,7 +1931,9 @@ static void ggml_cuda_mul_mat_cublas_impl(ggml_backend_cuda_context & ctx, const
     const int cc = ggml_cuda_info().devices[ctx.device].cc;
     bool prefer_f32_output = false;
     if (compute_type == GGML_TYPE_F16) {
-        prefer_f32_output = cc == GGML_CUDA_CC_VOLTA || GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_CDNA(cc);
+        // an F32 accumulator request sums F16 inputs in F32.
+        prefer_f32_output = cc == GGML_CUDA_CC_VOLTA || GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_CDNA(cc) ||
+            ggml_prec_get_acc(dst) == GGML_PREC_F32;
     } else if (compute_type == GGML_TYPE_BF16) {
         prefer_f32_output = !GGML_CUDA_CC_IS_RDNA3(cc) && !GGML_CUDA_CC_IS_RDNA4_M(cc) && !GGML_CUDA_CC_IS_CDNA(cc);
     }
@@ -2060,7 +2062,8 @@ static void ggml_cuda_mul_mat_cublas(ggml_backend_cuda_context & ctx, const ggml
     // F16 is the only compute type that can not satisfy a request for BF16
     if (prec == GGML_PREC_BF16 && compute_type == GGML_TYPE_F16) {
         compute_type = fast_bf16_hardware_available(cc) ? GGML_TYPE_BF16 : GGML_TYPE_F32;
-    } else if (prec == GGML_PREC_F32) {
+    } else if (prec == GGML_PREC_F32 && compute_type != GGML_TYPE_F16) {
+        // F16 inputs sum in F32 without converting src0 to F32.
         compute_type = GGML_TYPE_F32;
     }
 
