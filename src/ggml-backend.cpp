@@ -964,11 +964,23 @@ void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event)
     backend->iface.event_wait(backend, event);
 }
 
-static void ggml_backend_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * cgraph, struct ggml_backend_graph_optimize_params * params) {
+static void ggml_backend_graph_optimize_impl(ggml_backend_t backend, struct ggml_cgraph * cgraph, struct ggml_backend_graph_optimize_params * params) {
     GGML_ASSERT(backend);
     if (backend->iface.graph_optimize != NULL) {
         backend->iface.graph_optimize(backend, cgraph, params);
     }
+}
+
+void ggml_backend_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * cgraph,
+        void (*add_alloc_dep)(void * user_data, struct ggml_tensor * tensor, struct ggml_tensor * until), void * user_data) {
+    GGML_ASSERT(add_alloc_dep);
+
+    struct ggml_backend_graph_optimize_params params = {
+        /* .add_alloc_dep = */ add_alloc_dep,
+        /* .user_data     = */ user_data,
+    };
+
+    ggml_backend_graph_optimize_impl(backend, cgraph, &params);
 }
 
 // Backend device
@@ -1897,7 +1909,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         struct ggml_backend_sched_split * split = &sched->splits[i];
         split->graph = ggml_graph_view(graph, split->i_start, split->i_end);
 
-        ggml_backend_graph_optimize(sched->backends[split->backend_id], &split->graph, &opt_params);
+        ggml_backend_graph_optimize_impl(sched->backends[split->backend_id], &split->graph, &opt_params);
     }
 
     // each dep is added to graph_copy as a GGML_OP_NONE node with the kept tensors as srcs

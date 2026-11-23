@@ -109,6 +109,13 @@ extern "C" {
     GGML_API enum ggml_status ggml_backend_graph_compute      (ggml_backend_t backend, struct ggml_cgraph * cgraph);
     GGML_API enum ggml_status ggml_backend_graph_compute_async(ggml_backend_t backend, struct ggml_cgraph * cgraph);
 
+    // reorder the nodes of a graph for the backend (e.g. to run independent nodes concurrently or to group fusable nodes)
+    // the backend calls add_alloc_dep(user_data, tensor, until) for each tensor that must stay allocated until the node `until` has been computed
+    // ggml_backend_sched calls this itself; callers that allocate the graph with ggml_gallocr must call it before allocating and honor add_alloc_dep,
+    // e.g. by inserting after `until` a GGML_OP_NONE node with the kept tensors as srcs, as ggml_backend_sched does
+    GGML_API void ggml_backend_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * cgraph,
+            void (*add_alloc_dep)(void * user_data, struct ggml_tensor * tensor, struct ggml_tensor * until), void * user_data);
+
     // NOTE: will be removed, use device version instead
     GGML_API bool ggml_backend_supports_op(ggml_backend_t backend, const struct ggml_tensor * op);
     GGML_API bool ggml_backend_supports_buft(ggml_backend_t backend, ggml_backend_buffer_type_t buft);
