@@ -41,6 +41,9 @@ struct ggml_metal {
     bool use_concurrency;
     bool use_graph_optimize;
 
+    // reused by each graph optimization
+    ggml_graph_optimizer_t optimizer;
+
     int debug_graph;
 
     struct ggml_metal_fusion_info * finfo;
@@ -152,6 +155,8 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
             res->use_graph_optimize = false;
         }
 
+        res->optimizer = ggml_graph_optimizer_init();
+
         res->finfo = ggml_metal_device_get_fusion_info(dev);
         if (ggml_metal_fusion_info_stats(res->finfo)) {
             ggml_metal_fusion_info_labels_init(res->finfo);
@@ -219,6 +224,8 @@ void ggml_metal_free(ggml_metal_t ctx) {
         ggml_metal_pipelines_free(ctx->pipelines_ext);
         ctx->pipelines_ext = nil;
     }
+
+    ggml_graph_optimizer_free(ctx->optimizer);
 
     if (ggml_metal_fusion_info_debug(ctx->finfo) > 0) {
         GGML_LOG_DEBUG("%s: fusion stats:\n", __func__);
@@ -685,7 +692,7 @@ void ggml_metal_graph_optimize(ggml_metal_t ctx, struct ggml_cgraph * gf) {
     //const int64_t t_start = ggml_time_us();
 
     if (ctx->use_graph_optimize) {
-        ggml_graph_optimize(gf);
+        ggml_graph_optimize(ctx->optimizer, gf);
     }
 
     //printf("%s: graph optimize took %.3f ms\n", __func__, (ggml_time_us() - t_start) / 1000.0);

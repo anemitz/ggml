@@ -44,11 +44,17 @@ bool ggml_mem_ranges_add(ggml_mem_ranges_t mrs, const struct ggml_tensor * tenso
 // - new dst range overlaps with any existing range (src or dst)
 bool ggml_mem_ranges_check(ggml_mem_ranges_t mrs, const struct ggml_tensor * tensor);
 
+// the working storage of ggml_graph_optimize, which grows to the largest graph optimized with it and is then reused
+typedef struct ggml_graph_optimizer * ggml_graph_optimizer_t;
+
+ggml_graph_optimizer_t ggml_graph_optimizer_init(void);
+void ggml_graph_optimizer_free(ggml_graph_optimizer_t opt);
+
 // reorder the nodes in the graph to improve concurrency, while respecting the fusions of a device with props
 //
 // note: this implementation is generic and not specific to metal
 //       if it proves to work well, we can start using it for other backends in the future
-void ggml_graph_optimize(struct ggml_cgraph * gf);
+void ggml_graph_optimize(ggml_graph_optimizer_t opt, struct ggml_cgraph * gf);
 
 // mat-mat vs mat-vec dispatch; used by both supports_op and ggml_metal_op_mul_mat*
 bool ggml_metal_op_mul_mat_use_fwht (const struct ggml_tensor * op, size_t max_tg_mem);

@@ -339,30 +339,28 @@ bool ggml_mem_ranges_check(ggml_mem_ranges_t mrs, const ggml_tensor * tensor) {
 struct node_info {
     ggml_tensor * node;
 
-    std::vector<ggml_tensor *> fused;
+    // the tensors fused into the node, which follow it in the original order of the graph
+    ggml_tensor * const * fused;
+    int n_fused;
 
     ggml_op op() const {
         return node->op;
     }
 
     const ggml_tensor * dst() const {
-        return fused.empty() ? node : fused.back();
+        return n_fused == 0 ? node : fused[n_fused - 1];
     }
 
     bool is_empty() const {
         return ggml_op_is_empty(node->op);
     }
 
-    void add_fused(ggml_tensor * t) {
-        fused.push_back(t);
-    }
-
     bool is_output(const ggml_tensor * t) const {
         if (t == node) {
             return true;
         }
-        for (const auto * f : fused) {
-            if (t == f) {
+        for (int i = 0; i < n_fused; i++) {
+            if (t == fused[i]) {
                 return true;
             }
         }
@@ -370,7 +368,42 @@ struct node_info {
     }
 };
 
-static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node_info> & nodes) {
+// the working storage of ggml_graph_optimize
+// the vectors keep their capacity, so that optimizing a graph no larger than an earlier one does not allocate
+struct ggml_graph_optimizer {
+    std::vector<ggml_tensor *> nodes; // the nodes of the graph in their original order
+    std::vector<node_info>     infos; // the nodes with the fusable ones packed together
+    std::vector<int>           order; // the new order of infos
+    std::vector<bool>          used;
+
+    // the memory ranges for the set of currently concurrent nodes
+    ggml_mem_ranges_t mrs0;
+
+    // the memory ranges for the set of nodes that haven't been processed yet, when looking forward for a node to reorder
+    ggml_mem_ranges_t mrs1;
+};
+
+ggml_graph_optimizer_t ggml_graph_optimizer_init(void) {
+    auto * res = new ggml_graph_optimizer;
+
+    res->mrs0 = ggml_mem_ranges_init(0);
+    res->mrs1 = ggml_mem_ranges_init(0);
+
+    return res;
+}
+
+void ggml_graph_optimizer_free(ggml_graph_optimizer_t opt) {
+    if (opt == nullptr) {
+        return;
+    }
+
+    ggml_mem_ranges_free(opt->mrs0);
+    ggml_mem_ranges_free(opt->mrs1);
+
+    delete opt;
+}
+
+static void ggml_metal_graph_optimize_reorder(ggml_graph_optimizer_t opt) {
     // helper to add node src and dst ranges
     const auto & h_add = [](ggml_mem_ranges_t mrs, const node_info & node) {
         // only external sources matter: sources produced by the fused group are internal
@@ -383,7 +416,8 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
             }
         }
 
-        for (const auto * fused : node.fused) {
+        for (int k = 0; k < node.n_fused; k++) {
+            const ggml_tensor * fused = node.fused[k];
             for (int i = 0; i < GGML_MAX_SRC; i++) {
                 const ggml_tensor * src = fused->src[i];
                 if (src && !node.is_output(src)) {
@@ -398,8 +432,8 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
         if (!ggml_mem_ranges_add_dst(mrs, node.node)) {
             return false;
         }
-        for (const auto * fused : node.fused) {
-            if (!ggml_mem_ranges_add_dst(mrs, fused)) {
+        for (int k = 0; k < node.n_fused; k++) {
+            if (!ggml_mem_ranges_add_dst(mrs, node.fused[k])) {
                 return false;
             }
         }
@@ -418,7 +452,8 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
             }
         }
 
-        for (const auto * fused : node.fused) {
+        for (int k = 0; k < node.n_fused; k++) {
+            const ggml_tensor * fused = node.fused[k];
             for (int i = 0; i < GGML_MAX_SRC; i++) {
                 const ggml_tensor * src = fused->src[i];
                 if (src && !node.is_output(src)) {
@@ -432,8 +467,8 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
         if (!ggml_mem_ranges_check_dst(mrs, node.node)) {
             return false;
         }
-        for (const auto * fused : node.fused) {
-            if (!ggml_mem_ranges_check_dst(mrs, fused)) {
+        for (int k = 0; k < node.n_fused; k++) {
+            if (!ggml_mem_ranges_check_dst(mrs, node.fused[k])) {
                 return false;
             }
         }
@@ -477,18 +512,21 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
         }
     };
 
+    const auto & nodes = opt->infos;
+
     const int n = nodes.size();
 
-    std::vector<int> res;
+    std::vector<int> & res = opt->order;
+    res.clear();
     res.reserve(n);
 
-    std::vector<bool> used(n, false);
+    std::vector<bool> & used = opt->used;
+    used.assign(n, false);
 
-    // the memory ranges for the set of currently concurrent nodes
-    ggml_mem_ranges_t mrs0 = ggml_mem_ranges_init(0);
+    ggml_mem_ranges_t mrs0 = opt->mrs0;
+    ggml_mem_ranges_reset(mrs0);
 
-    // the memory ranges for the set of nodes that haven't been processed yet, when looking forward for a node to reorder
-    ggml_mem_ranges_t mrs1 = ggml_mem_ranges_init(0);
+    ggml_mem_ranges_t mrs1 = opt->mrs1;
 
     for (int i0 = 0; i0 < n; i0++) {
         if (used[i0]) {
@@ -552,17 +590,16 @@ static std::vector<int> ggml_metal_graph_optimize_reorder(const std::vector<node
             res.push_back(i0);
         }
     }
-
-    ggml_mem_ranges_free(mrs0);
-    ggml_mem_ranges_free(mrs1);
-
-    return res;
 }
 
-void ggml_graph_optimize(ggml_cgraph * gf) {
+void ggml_graph_optimize(ggml_graph_optimizer_t opt, ggml_cgraph * gf) {
     const int n = gf->n_nodes;
 
-    std::vector<node_info> nodes;
+    // the node infos point into this copy, as the unfusing below overwrites gf->nodes
+    opt->nodes.assign(gf->nodes, gf->nodes + n);
+
+    std::vector<node_info> & nodes = opt->infos;
+    nodes.clear();
     nodes.reserve(gf->n_nodes);
 
     // fuse nodes:
@@ -572,33 +609,32 @@ void ggml_graph_optimize(ggml_cgraph * gf) {
     // the fusable sequences are declared in the fusion table (ggml-metal-fuse.cpp), so the
     // packing here is driven by the same patterns that the op encoders will later use
     for (int i = 0; i < n; i++) {
-        node_info node = {
-            /*.node =*/ gf->nodes[i],
-            /*.fused =*/ {},
-        };
-
         const int f = ggml_metal_fusion_max(gf, i);
 
         // add the fused tensors into the node info so we can unfuse them later
-        for (int k = 1; k < f; k++) {
-            ++i;
+        // the .dst() becomes the last fused tensor
+        node_info node = {
+            /*.node    =*/ opt->nodes[i],
+            /*.fused   =*/ opt->nodes.data() + i + 1,
+            /*.n_fused =*/ f - 1,
+        };
 
-            // the .dst() becomes the last fused tensor
-            node.add_fused(gf->nodes[i]);
-        }
+        i += f - 1;
 
-        nodes.push_back(std::move(node));
+        nodes.push_back(node);
     }
 
 #if 1
     // reorder to improve concurrency
-    const auto order = ggml_metal_graph_optimize_reorder(nodes);
+    ggml_metal_graph_optimize_reorder(opt);
 #else
-    std::vector<int> order(nodes.size());
+    opt->order.resize(nodes.size());
     for (size_t i = 0; i < nodes.size(); i++) {
-        order[i] = i;
+        opt->order[i] = i;
     }
 #endif
+
+    const auto & order = opt->order;
 
     // unfuse
     {
@@ -608,8 +644,8 @@ void ggml_graph_optimize(ggml_cgraph * gf) {
 
             gf->nodes[j++] = node.node;
 
-            for (auto * fused : node.fused) {
-                gf->nodes[j++] = fused;
+            for (int k = 0; k < node.n_fused; k++) {
+                gf->nodes[j++] = node.fused[k];
             }
         }
     }
