@@ -10,18 +10,25 @@ typedef struct ggml_metal_op * ggml_metal_op_t;
 
 struct ggml_metal_fusion; // forward decl (ggml-metal-device.h)
 
+// an op encodes a range of a graph's nodes into one command buffer, between begin and end
+// it keeps its list of nodes and its memory ranges from one begin to the next
 ggml_metal_op_t ggml_metal_op_init(
         ggml_metal_device_t dev,
+        int  debug_graph);
+
+void ggml_metal_op_free(ggml_metal_op_t ctx);
+
+void ggml_metal_op_begin(
+        ggml_metal_op_t ctx,
         ggml_metal_cmd_buf_t cmd_buf,
         struct ggml_cgraph * gf,
         struct ggml_metal_fusion_info * finfo,
         int  idx_start,
         int  idx_end,
         bool use_concurrency,
-        bool use_capture,
-        int  debug_graph);
+        bool use_capture);
 
-void ggml_metal_op_free(ggml_metal_op_t ctx);
+void ggml_metal_op_end(ggml_metal_op_t ctx);
 
 int ggml_metal_op_n_nodes(ggml_metal_op_t ctx);
 

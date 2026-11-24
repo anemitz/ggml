@@ -34,26 +34,44 @@ static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
 struct ggml_metal_op {
     ggml_metal_op(
         ggml_metal_device_t dev,
+        int  debug_graph) {
+        this->dev             = dev;
+        this->lib             = ggml_metal_device_get_library(dev);
+        this->enc             = nullptr;
+        this->mem_ranges      = ggml_mem_ranges_init(debug_graph);
+        this->finfo           = nullptr;
+        this->use_concurrency = false;
+        this->use_capture     = false;
+        this->debug_graph     = debug_graph;
+        this->gf              = nullptr;
+        this->idx_start       = 0;
+        this->idx_end         = 0;
+    }
+
+    ~ggml_metal_op() {
+        ggml_mem_ranges_free(this->mem_ranges);
+    }
+
+    void begin(
         ggml_metal_cmd_buf_t cmd_buf,
         ggml_cgraph * gf,
         ggml_metal_fusion_info * finfo,
         int  idx_start,
         int  idx_end,
         bool use_concurrency,
-        bool use_capture,
-        int  debug_graph) {
-        this->dev             = dev;
-        this->lib             = ggml_metal_device_get_library(dev);
+        bool use_capture) {
         this->enc             = ggml_metal_encoder_init(cmd_buf, use_concurrency);
-        this->mem_ranges      = ggml_mem_ranges_init(debug_graph);
         this->finfo           = finfo;
         this->idx_start       = idx_start;
         this->idx_end         = idx_end;
         this->use_concurrency = use_concurrency;
         this->use_capture     = use_capture;
-        this->debug_graph     = debug_graph;
         this->gf              = gf;
 
+        ggml_mem_ranges_reset(this->mem_ranges);
+
+        // the list keeps its capacity, so it stops allocating once it has held the largest graph
+        idxs.clear();
         idxs.reserve(gf->n_nodes);
 
         // filter empty nodes
@@ -66,10 +84,10 @@ struct ggml_metal_op {
         }
     }
 
-    ~ggml_metal_op() {
+    void end() {
         ggml_metal_encoder_end_encoding(this->enc);
         ggml_metal_encoder_free(this->enc);
-        ggml_mem_ranges_free(this->mem_ranges);
+        this->enc = nullptr;
     }
 
     int n_nodes() const {
@@ -126,23 +144,9 @@ private:
 
 ggml_metal_op_t ggml_metal_op_init(
         ggml_metal_device_t dev,
-        ggml_metal_cmd_buf_t cmd_buf,
-        ggml_cgraph * gf,
-        ggml_metal_fusion_info * finfo,
-        int idx_start,
-        int idx_end,
-        bool use_concurrency,
-        bool use_capture,
         int debug_graph) {
     ggml_metal_op_t res = new ggml_metal_op(
         dev,
-        cmd_buf,
-        gf,
-        finfo,
-        idx_start,
-        idx_end,
-        use_concurrency,
-        use_capture,
         debug_graph);
 
     return res;
@@ -150,6 +154,22 @@ ggml_metal_op_t ggml_metal_op_init(
 
 void ggml_metal_op_free(ggml_metal_op_t ctx) {
     delete ctx;
+}
+
+void ggml_metal_op_begin(
+        ggml_metal_op_t ctx,
+        ggml_metal_cmd_buf_t cmd_buf,
+        ggml_cgraph * gf,
+        ggml_metal_fusion_info * finfo,
+        int idx_start,
+        int idx_end,
+        bool use_concurrency,
+        bool use_capture) {
+    ctx->begin(cmd_buf, gf, finfo, idx_start, idx_end, use_concurrency, use_capture);
+}
+
+void ggml_metal_op_end(ggml_metal_op_t ctx) {
+    ctx->end();
 }
 
 int ggml_metal_op_n_nodes(ggml_metal_op_t ctx) {

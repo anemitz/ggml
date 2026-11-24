@@ -22,6 +22,9 @@
 
 struct ggml_metal_command_buffer {
     id<MTLCommandBuffer> obj;
+
+    // encodes this command buffer's nodes on each graph compute
+    ggml_metal_op_t op;
 };
 
 struct ggml_metal {
@@ -157,6 +160,10 @@ ggml_metal_t ggml_metal_init(ggml_metal_device_t dev) {
 
         res->optimizer = ggml_graph_optimizer_init();
 
+        for (int i = 0; i < GGML_METAL_MAX_COMMAND_BUFFERS + 1; ++i) {
+            res->cmd_bufs[i].op = ggml_metal_op_init(dev, res->debug_graph);
+        }
+
         res->finfo = ggml_metal_device_get_fusion_info(dev);
         if (ggml_metal_fusion_info_stats(res->finfo)) {
             ggml_metal_fusion_info_labels_init(res->finfo);
@@ -226,6 +233,10 @@ void ggml_metal_free(ggml_metal_t ctx) {
     }
 
     ggml_graph_optimizer_free(ctx->optimizer);
+
+    for (int i = 0; i < GGML_METAL_MAX_COMMAND_BUFFERS + 1; ++i) {
+        ggml_metal_op_free(ctx->cmd_bufs[i].op);
+    }
 
     if (ggml_metal_fusion_info_debug(ctx->finfo) > 0) {
         GGML_LOG_DEBUG("%s: fusion stats:\n", __func__);
@@ -767,16 +778,17 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
 
         id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[cb_idx].obj;
 
-        ggml_metal_op_t ctx_op = ggml_metal_op_init(
-            ctx->dev,
+        ggml_metal_op_t ctx_op = ctx->cmd_bufs[cb_idx].op;
+
+        ggml_metal_op_begin(
+            ctx_op,
             cmd_buf,
             ctx->gf,
             ctx->finfo,
             idx_start,
             idx_end,
             ctx->use_concurrency,
-            ctx->capture_compute == 0,
-            ctx->debug_graph);
+            ctx->capture_compute == 0);
 
         for (int idx = 0; idx < ggml_metal_op_n_nodes(ctx_op); ++idx) {
             const int res = ggml_metal_op_encode(ctx_op, idx);
@@ -787,7 +799,7 @@ void ggml_metal_set_n_cb(ggml_metal_t ctx, int n_cb) {
             idx += res - 1;
         }
 
-        ggml_metal_op_free(ctx_op);
+        ggml_metal_op_end(ctx_op);
 
         if (cb_idx < 2 || ctx->abort_callback == NULL) {
             [cmd_buf commit];
