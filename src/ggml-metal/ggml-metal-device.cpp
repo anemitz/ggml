@@ -7,9 +7,9 @@
 #include "ggml-impl.h"
 
 #include <cassert>
+#include <map>
 #include <memory>
 #include <string>
-#include <unordered_map>
 
 struct ggml_metal_device_deleter {
     void operator()(ggml_metal_device_t ctx) {
@@ -28,7 +28,8 @@ ggml_metal_device_t ggml_metal_device_get(int device, int n_devices) {
 }
 
 struct ggml_metal_pipelines {
-    std::unordered_map<std::string, ggml_metal_pipeline_t> data;
+    // std::less<> finds a name without building a std::string
+    std::map<std::string, ggml_metal_pipeline_t, std::less<>> data;
 };
 
 ggml_metal_pipelines_t ggml_metal_pipelines_init(void) {
@@ -54,11 +55,12 @@ void ggml_metal_pipelines_add(ggml_metal_pipelines_t ppls, const char * name, gg
 }
 
 ggml_metal_pipeline_t ggml_metal_pipelines_get(ggml_metal_pipelines_t ppls, const char * name) {
-    if (ppls->data.find(name) == ppls->data.end()) {
+    const auto it = ppls->data.find(name);
+    if (it == ppls->data.end()) {
         return nullptr;
     }
 
-    return ppls->data[name];
+    return it->second;
 }
 
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_base(ggml_metal_library_t lib, ggml_op op) {
