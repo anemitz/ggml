@@ -158,8 +158,14 @@ static int ggml_dyn_tallocr_new_chunk(struct ggml_dyn_tallocr * alloc, size_t mi
     if (alloc->n_chunks >= GGML_VBUFFER_MAX_CHUNKS) {
         return -1;
     }
-    struct tallocr_chunk * chunk = calloc(1, sizeof(struct tallocr_chunk));
+    // reuse the record of a chunk from an earlier plan, see ggml_dyn_tallocr_reset
+    struct tallocr_chunk * chunk = alloc->chunks[alloc->n_chunks];
+    if (chunk == NULL) {
+        chunk = calloc(1, sizeof(struct tallocr_chunk));
+        alloc->chunks[alloc->n_chunks] = chunk;
+    }
     chunk->n_free_blocks = 1;
+    chunk->max_size = 0;
     chunk->free_blocks[0].offset = 0;
     // available space in a chunk is limited to max_chunk_size, but can be higher if:
     // 1. a single tensor exceeds the maximum, and cannot fit any other way
@@ -169,7 +175,6 @@ static int ggml_dyn_tallocr_new_chunk(struct ggml_dyn_tallocr * alloc, size_t mi
     if (alloc->n_chunks == GGML_VBUFFER_MAX_CHUNKS - 1) {
         chunk->free_blocks[0].size = SIZE_MAX/2;
     }
-    alloc->chunks[alloc->n_chunks] = chunk;
     alloc->n_chunks++;
     return alloc->n_chunks - 1;
 }
@@ -347,10 +352,7 @@ static void ggml_dyn_tallocr_free_bytes(struct ggml_dyn_tallocr * alloc, struct 
 }
 
 static void ggml_dyn_tallocr_reset(struct ggml_dyn_tallocr * alloc) {
-    for (int i = 0; i < GGML_VBUFFER_MAX_CHUNKS; i++) {
-        free(alloc->chunks[i]);
-        alloc->chunks[i] = NULL;
-    }
+    // keep the chunk records, so that planning a graph again does not reallocate them
     alloc->n_chunks = 0;
 
 #ifdef GGML_ALLOCATOR_DEBUG
@@ -379,7 +381,7 @@ static struct ggml_dyn_tallocr * ggml_dyn_tallocr_new(size_t alignment, size_t m
 }
 
 static void ggml_dyn_tallocr_free(struct ggml_dyn_tallocr * alloc) {
-    for (int i = 0; i < alloc->n_chunks; ++i) {
+    for (int i = 0; i < GGML_VBUFFER_MAX_CHUNKS; ++i) {
         free(alloc->chunks[i]);
     }
     free(alloc);
@@ -487,9 +489,11 @@ struct ggml_gallocr {
 
     struct node_alloc * node_allocs; // [n_nodes]
     int n_nodes;
+    int node_allocs_size; // capacity of node_allocs
 
     struct leaf_alloc * leaf_allocs; // [n_leafs]
     int n_leafs;
+    int leaf_allocs_size; // capacity of leaf_allocs
 };
 
 ggml_gallocr_t ggml_gallocr_new_n(ggml_backend_buffer_type_t * bufts, int n_bufs) {
@@ -845,10 +849,12 @@ static bool ggml_gallocr_reserve_n_impl(
     ggml_gallocr_alloc_graph_impl(galloc, graph, node_buffer_ids, leaf_buffer_ids);
 
     // set the node_allocs from the hash table
-    if (galloc->n_nodes < graph->n_nodes) {
+    // the arrays grow to the largest graph planned so far, so that a smaller graph in between does not cause reallocations
+    if (galloc->node_allocs_size < graph->n_nodes) {
         free(galloc->node_allocs);
         galloc->node_allocs = calloc(graph->n_nodes, sizeof(struct node_alloc));
         GGML_ASSERT(galloc->node_allocs != NULL);
+        galloc->node_allocs_size = graph->n_nodes;
     }
     galloc->n_nodes = graph->n_nodes;
     for (int i = 0; i < graph->n_nodes; i++) {
@@ -878,10 +884,11 @@ static bool ggml_gallocr_reserve_n_impl(
             }
         }
     }
-    if (galloc->n_leafs < graph->n_leafs) {
+    if (galloc->leaf_allocs_size < graph->n_leafs) {
         free(galloc->leaf_allocs);
         galloc->leaf_allocs = calloc(graph->n_leafs, sizeof(galloc->leaf_allocs[0]));
         GGML_ASSERT(galloc->leaf_allocs != NULL);
+        galloc->leaf_allocs_size = graph->n_leafs;
     }
     galloc->n_leafs = graph->n_leafs;
     for (int i = 0; i < graph->n_leafs; i++) {
