@@ -5531,6 +5531,10 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
         // add alloc deps for performance positive fusions. This may increase the overall compute buffer size.
         // TODO: consolidate fusion paths in graph_optimize and graph_compute
         ggml_cuda_set_device(cuda_ctx->device);
+
+        // the top-k MoE op sequence, reused for each candidate node so that the loop does not allocate per node
+        std::vector<ggml_op> ops;
+
         for (int i = 0; i + 5 < cgraph->n_nodes; ++i) {
             if (cgraph->nodes[i]->op != GGML_OP_MUL_MAT_ID) {
                 continue;
@@ -5607,7 +5611,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
                     cgraph->nodes[i]->op == GGML_OP_ARGSORT) {
                 ggml_cuda_topk_moe_args args;
                 const bool              can_fuse = ggml_cuda_topk_moe_fusion(cgraph, i, args);
-                std::vector<ggml_op>    ops;
+                ops.clear();
                 ops.reserve(13);  // max ops; avoids gcc -Wstringop-overflow false positive
 
                 const ggml_tensor * node = cgraph->nodes[i];
