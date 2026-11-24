@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -938,19 +937,35 @@ static void ggml_metal_fusion_add_pattern_alloc_deps(
         ggml_cgraph * gf,
         const ggml_metal_fusion * fusion,
         int node_idx) {
-    const int last_node = node_idx + (int) fusion->ops_all.size() - 1;
+    const int n_raw     = (int) fusion->ops_all.size();
+    const int last_node = node_idx + n_raw - 1;
+
+    GGML_ASSERT(n_raw <= GGML_METAL_FUSION_MAX);
 
     // keep all external inputs alive until the fused output
-    std::set<ggml_tensor *> seen;
-    for (int j = 0; j < (int) fusion->ops_all.size(); ++j) {
+    // seen holds every source and node of the pattern, so it needs no allocation
+    const ggml_tensor * seen[GGML_METAL_FUSION_MAX*(GGML_MAX_SRC + 1)];
+    int n_seen = 0;
+
+    const auto is_seen = [&](const ggml_tensor * t) {
+        for (int k = 0; k < n_seen; ++k) {
+            if (seen[k] == t) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (int j = 0; j < n_raw; ++j) {
         ggml_tensor * node = gf->nodes[node_idx + j];
         for (int s = 0; s < GGML_MAX_SRC; ++s) {
             ggml_tensor * src = node->src[s];
-            if (src && seen.insert(src).second) {
+            if (src && !is_seen(src)) {
+                seen[n_seen++] = src;
                 add_alloc_dep(user_data, src, gf->nodes[last_node]);
             }
         }
-        seen.insert(node);
+        seen[n_seen++] = node;
     }
 }
 
