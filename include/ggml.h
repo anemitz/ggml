@@ -2684,6 +2684,10 @@ extern "C" {
     GGML_API void                 ggml_graph_cpy       (struct ggml_cgraph * src, struct ggml_cgraph * dst);
     GGML_API void                 ggml_graph_reset     (struct ggml_cgraph * cgraph); // set regular grads + optimizer momenta to 0, set loss grad to 1
     GGML_API void                 ggml_graph_clear     (struct ggml_cgraph * cgraph);
+    // give the graph a new id. A backend may keep work for a graph id, such as a captured
+    // CUDA graph, and reuse it without checking the nodes again while the id stays. Call it
+    // after building or changing a graph that ggml_backend_sched does not split.
+    GGML_API void                 ggml_graph_new_uid   (struct ggml_cgraph * cgraph);
 
     GGML_API int                   ggml_graph_size   (struct ggml_cgraph * cgraph);
     GGML_API struct ggml_tensor *  ggml_graph_node   (struct ggml_cgraph * cgraph, int i); // if i < 0, returns nodes[n_nodes + i]

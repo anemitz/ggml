@@ -7589,6 +7589,10 @@ void ggml_graph_reset(struct ggml_cgraph * cgraph) {
     }
 }
 
+void ggml_graph_new_uid(struct ggml_cgraph * cgraph) {
+    cgraph->uid = ggml_graph_next_uid();
+}
+
 void ggml_graph_clear(struct ggml_cgraph * cgraph) {
     cgraph->n_leafs = 0;
     cgraph->n_nodes = 0;
