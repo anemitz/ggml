@@ -3480,6 +3480,8 @@ static bool ggml_cuda_should_fuse_rms_norm_mul_rope(const ggml_tensor * rms_norm
 
 // match gated_delta_net + the strided cpy that scatters its state snapshots into the cache
 // (slot i -> rollback group i, slot 0 newest), so the kernel can write them and skip the cpy.
+// Also match a one-token gated_delta_net + the set_rows that stores each sequence's state in
+// the cache row that its index names.
 static int ggml_cuda_try_gdn_cache_fusion(
         const ggml_cgraph * cgraph, int node_idx, ggml_cuda_gated_delta_net_fused_cache & fused_state_cpy) {
     const ggml_tensor * gdn = cgraph->nodes[node_idx];
@@ -3509,7 +3511,7 @@ static int ggml_cuda_try_gdn_cache_fusion(
         if (ggml_cuda_is_view_or_noop(n)) {
             continue;
         }
-        if (n->op != GGML_OP_CPY || (n->flags & GGML_TENSOR_FLAG_OUTPUT)) {
+        if ((n->op != GGML_OP_CPY && n->op != GGML_OP_SET_ROWS) || (n->flags & GGML_TENSOR_FLAG_OUTPUT)) {
             return 0;
         }
         cpy  = n;
@@ -3517,6 +3519,26 @@ static int ggml_cuda_try_gdn_cache_fusion(
     }
     if (cpy == nullptr) {
         return 0;
+    }
+
+    if (cpy->op == GGML_OP_SET_ROWS) {
+        // set_rows(cache, tail, rows): the tail holds one state per sequence, [D, n_seqs], and
+        // the cache's rows are D apart. More tokens keep the chunked kernel, which writes
+        // consecutive rows only.
+        const ggml_tensor * tail = cpy->src[0];
+        const ggml_tensor * rows = cpy->src[1];
+        if (K != 1 || n_tokens != 1 || tail->op != GGML_OP_VIEW || tail->view_src != gdn ||
+            tail->view_offs != tail_off || !ggml_is_contiguous(tail) || tail->ne[0] != D ||
+            ggml_nelements(tail) != D * n_seqs || rows->type != GGML_TYPE_I32 || !ggml_is_contiguous(rows) ||
+            ggml_nelements(rows) != n_seqs || rows->data == nullptr || cpy->type != GGML_TYPE_F32 ||
+            cpy->data == nullptr || cpy->ne[0] != D || cpy->nb[0] != ggml_type_size(GGML_TYPE_F32) ||
+            cpy->nb[1] != (size_t) ggml_row_size(GGML_TYPE_F32, D)) {
+            return 0;
+        }
+        fused_state_cpy.data        = (float *) cpy->data;
+        fused_state_cpy.slot_stride = 0;
+        fused_state_cpy.rows        = (const int32_t *) rows->data;
+        return skip;
     }
 
     const ggml_tensor * src = cpy->src[0]; // view of the gdn snapshot tail
@@ -3539,6 +3561,7 @@ static int ggml_cuda_try_gdn_cache_fusion(
 
     fused_state_cpy.data        = (float *) dst->data; // rollback group 0 (newest)
     fused_state_cpy.slot_stride = K > 1 ? (int64_t) (dst->nb[2] / sizeof(float)) : 0;
+    fused_state_cpy.rows        = nullptr;
     return skip;
 }
 
