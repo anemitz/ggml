@@ -9136,11 +9136,13 @@ struct test_flash_attn_ext_kv_rows : public test_case {
     const int64_t nb;       // queries per slice
     const int64_t n_slices;
     const ggml_type type_KV;
+    const bool head_mask;   // a mask plane per Q head
+    const bool sinks;
 
     std::vector<int32_t> rows;
 
     std::string vars() override {
-        return VARS_TO_STR8(hs, nh, gqa, n_cells, kv, nb, n_slices, type_KV);
+        return VARS_TO_STR10(hs, nh, gqa, n_cells, kv, nb, n_slices, type_KV, head_mask, sinks);
     }
 
     double max_nmse_err() override {
@@ -9148,8 +9150,10 @@ struct test_flash_attn_ext_kv_rows : public test_case {
     }
 
     test_flash_attn_ext_kv_rows(int64_t hs = 256, int64_t nh = 2, int64_t gqa = 8, int64_t n_cells = 2048, int64_t kv = 512,
-                                int64_t nb = 8, int64_t n_slices = 4, ggml_type type_KV = GGML_TYPE_F16)
-        : hs(hs), nh(nh), gqa(gqa), n_cells(n_cells), kv(kv), nb(nb), n_slices(n_slices), type_KV(type_KV) {}
+                                int64_t nb = 8, int64_t n_slices = 4, ggml_type type_KV = GGML_TYPE_F16,
+                                bool head_mask = false, bool sinks = false)
+        : hs(hs), nh(nh), gqa(gqa), n_cells(n_cells), kv(kv), nb(nb), n_slices(n_slices), type_KV(type_KV),
+          head_mask(head_mask), sinks(sinks) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs, nb, nh*gqa, n_slices);
@@ -9164,7 +9168,7 @@ struct test_flash_attn_ext_kv_rows : public test_case {
         ggml_tensor * k = ggml_permute(ctx, k0, 0, 2, 1, 3);
         ggml_tensor * v = ggml_permute(ctx, v0, 0, 2, 1, 3);
 
-        ggml_tensor * m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, 1, n_slices);
+        ggml_tensor * m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, head_mask ? nh*gqa : 1, n_slices);
         ggml_set_name(m, "m");
 
         ggml_tensor * r = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, kv, n_slices);
@@ -9172,6 +9176,11 @@ struct test_flash_attn_ext_kv_rows : public test_case {
 
         ggml_tensor * out = ggml_flash_attn_ext_rows(ctx, q, k, v, m, r, 1.0f/sqrtf(hs), 0.0f, 0.0f);
         ggml_prec_set_acc(out, GGML_PREC_F32);
+        if (sinks) {
+            ggml_tensor * s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, nh*gqa);
+            ggml_set_name(s, "s");
+            ggml_flash_attn_ext_add_sinks(out, s);
+        }
         ggml_set_name(out, "out");
 
         return out;
@@ -9203,12 +9212,16 @@ struct test_flash_attn_ext_kv_rows : public test_case {
             } else if (strcmp(t->name, "m") == 0) {
                 std::vector<float> f(ggml_nelements(t));
                 std::uniform_real_distribution<float> dis(-1.0f, 1.0f);
+                const int64_t n_planes = t->ne[2];
                 for (int64_t s = 0; s < n_slices; ++s) {
-                    for (int64_t j = 0; j < nb; ++j) {
-                        for (int64_t i = 0; i < kv; ++i) {
-                            const bool pad = rows[s*kv + i] < 0;
-                            const bool drop = (i + 3*j + 5*s) % 11 == 0;
-                            f[(s*nb + j)*kv + i] = pad || drop ? -INFINITY : dis(gen);
+                    for (int64_t h = 0; h < n_planes; ++h) {
+                        for (int64_t j = 0; j < nb; ++j) {
+                            for (int64_t i = 0; i < kv; ++i) {
+                                const bool pad = rows[s*kv + i] < 0;
+                                // the dropped keys differ by head plane
+                                const bool drop = (i + 3*j + 5*s + 7*h) % 11 == 0;
+                                f[((s*n_planes + h)*nb + j)*kv + i] = pad || drop ? -INFINITY : dis(gen);
+                            }
                         }
                     }
                 }
@@ -13038,6 +13051,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_flash_attn_ext_kv_rows( 64, 4, 2, 3000, 768,  nb, n_slices, GGML_TYPE_Q8_0));
             test_cases.emplace_back(new test_flash_attn_ext_kv_rows(512, 2, 8, 4096, 1024, nb, n_slices));
             test_cases.emplace_back(new test_flash_attn_ext_kv_rows(256, 8, 2, 4096, 1280, nb, n_slices));
+            // a mask plane per Q head, as a learned relative-position bias needs
+            test_cases.emplace_back(new test_flash_attn_ext_kv_rows(128, 8, 3, 4096, 512,  nb, n_slices, GGML_TYPE_F16, true, true));
+            test_cases.emplace_back(new test_flash_attn_ext_kv_rows(128, 4, 1, 1000, 256,  nb, n_slices, GGML_TYPE_F16, true, false));
+            test_cases.emplace_back(new test_flash_attn_ext_kv_rows(256, 2, 8, 4096, 1024, nb, n_slices, GGML_TYPE_F16, true, true));
         }
     }
 

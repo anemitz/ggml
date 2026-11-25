@@ -679,10 +679,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
     if (mask && mask->ne[2] != 1) {
-        // the kv_rows mask is compacted per sequence, it has no head dimension
-        if (kv_rows) {
-            return BEST_FATTN_KERNEL_NONE;
-        }
+        // with kv_rows the mask's columns follow the row list in every head plane, and padded
+        // rows read row 0 under a -inf mask, so the MMA kernel needs no mask scan to skip them
         // the logit softcap kernels are compiled for these head sizes only
         float logit_softcap;
         memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
